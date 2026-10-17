@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.1`
+- Version: `0.1.2`
 - Image target: `/R4OS/SDK/Toolchains/C/bin/R4CC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
