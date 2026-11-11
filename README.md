@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.2`
+- Version: `0.1.4`
 - Image target: `/R4OS/SDK/Toolchains/C/bin/R4CC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -18,14 +18,12 @@ On Windows:
 
     Build.bat
 
-On Linux or macOS:
+On Linux:
 
     ./Build.sh
 
-The build starters resolve the current local R4OS dependency checkouts through
-`Settings.R4S`. The URL and hash entries in `build.zig.zon` record the
-last verified standalone dependency identities; workspace builds use the
-mapped local checkouts.
+The build starters verify the pinned SDK and its matched Contract, Libraries
+and host tools. `build.zig.zon` records the standalone package identities.
 
 ## Documentation
 

@@ -10,6 +10,7 @@ pub const CompileError = enum {
     TextLiteralTooLong,
     MissingMain,
     MissingWriteCall,
+    MissingStdioLoop,
     MissingGuiInit,
     MissingGuiDrawCall,
     MissingGuiEventLoop,
@@ -20,6 +21,8 @@ pub const CompileError = enum {
 
 pub const CompileResult = struct {
     ok: bool,
+    generation: u8 = 1,
+    stdio: bool = false,
     code: []const u8 = "",
     text: []const u8 = "",
     detail: []const u8 = "",
@@ -46,8 +49,9 @@ pub fn errorMessage(err: CompileError) []const u8 {
         .MissingNamedTextMacro => "missing required R4OS_TEXT symbol",
         .BadTextMacro => "invalid R4OS_TEXT macro",
         .TextLiteralTooLong => "R4OS_TEXT literal is too long",
-        .MissingMain => "missing int32_t r4_app_main(R4App*)",
+        .MissingMain => "missing int32_t r4_app_main with the selected App generation",
         .MissingWriteCall => "missing supported r4sys_write_line(&app->system, text) call",
+        .MissingStdioLoop => "generation2 stdio requires the complete checked write loop",
         .MissingGuiInit => "missing R4DESK/R4DRAW init calls",
         .MissingGuiDrawCall => "missing supported R4DESK/R4DRAW GUI calls",
         .MissingGuiEventLoop => "missing supported GUI event loop",
@@ -58,29 +62,54 @@ pub fn errorMessage(err: CompileError) []const u8 {
 }
 
 pub fn compileConsole(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    return compileConsoleGeneration(1, source_raw, code_out, literal_out);
+}
+
+pub fn compileConsole2(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    return compileConsoleGeneration(2, source_raw, code_out, literal_out);
+}
+
+fn compileConsoleGeneration(comptime generation: u8, source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
     const source = stripUtf8Bom(source_raw);
     if (indexOf(source, "#include <r4os/r4os.h>") == null) {
         return fail(.MissingInclude, lineOf(source, 0));
     }
-    if (!hasAppMainShape(source)) return fail(.MissingMain, lineOf(source, 0));
+    if (!hasAppMainShape(generation, source)) return fail(.MissingMain, lineOf(source, 0));
 
     const macro = parseTextMacro(source, literal_out) orelse {
         if (indexOf(source, "R4OS_TEXT") == null) return fail(.MissingTextMacro, lineOf(source, 0));
         return fail(.BadTextMacro, lineOf(source, indexOf(source, "R4OS_TEXT") orelse 0));
     };
+    if (generation == 2 and indexOf(source, "R4SdkStdioWrite") != null) {
+        const call = parseStdioCall(source) orelse return fail(.MissingWriteCall, lineOf(source, 0));
+        if (!equals(macro.name, call.name)) return fail(.TextSymbolMismatch, call.line);
+        if (indexOf(source, "R4SdkStdio2") == null or indexOf(source, "progress.bytes") == null or
+            indexOf(source, "R4OS_BYTE_PIPE_WOULD_BLOCK") == null or indexOf(source, "r4_app2_should_close") == null or
+            indexOf(source, "r4sys_sleep_ticks") == null) return fail(.MissingStdioLoop, call.line);
+        const code = emitStdioConsole2(code_out, macro.text) orelse return fail(.CodeBufferTooSmall, macro.line);
+        return .{ .ok = true, .generation = 2, .stdio = true, .code = code, .text = macro.text };
+    }
     const call = parseWriteCall(source) orelse return fail(.MissingWriteCall, lineOf(source, 0));
     if (!equals(macro.name, call.name)) return fail(.TextSymbolMismatch, call.line);
 
-    const code = emitConsoleCode(code_out, macro.text, call.line_output) orelse return fail(.CodeBufferTooSmall, macro.line);
-    return .{ .ok = true, .code = code, .text = macro.text };
+    const code = emitConsoleCode(generation, code_out, macro.text, call.line_output) orelse return fail(.CodeBufferTooSmall, macro.line);
+    return .{ .ok = true, .generation = generation, .code = code, .text = macro.text };
 }
 
 pub fn compileDesktopOk(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    return compileDesktopGeneration(1, source_raw, code_out, literal_out);
+}
+
+pub fn compileDesktopOk2(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    return compileDesktopGeneration(2, source_raw, code_out, literal_out);
+}
+
+fn compileDesktopGeneration(comptime generation: u8, source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
     const source = stripUtf8Bom(source_raw);
     if (indexOf(source, "#include <r4os/r4os.h>") == null) {
         return fail(.MissingInclude, lineOf(source, 0));
     }
-    if (!hasAppMainShape(source)) return fail(.MissingMain, lineOf(source, 0));
+    if (!hasAppMainShape(generation, source)) return fail(.MissingMain, lineOf(source, 0));
     if (literal_out.len < 3 * max_literal_bytes / 4) return fail(.TextLiteralTooLong, lineOf(source, 0));
 
     const title_buffer = literal_out[0..160];
@@ -111,18 +140,18 @@ pub fn compileDesktopOk(source_raw: []const u8, code_out: []u8, literal_out: []u
         return fail(.MissingOkButton, lineOf(source, 0));
     }
 
-    const code = emitDesktopOkCode(code_out, title.text, ok_label.text, message.text) orelse return fail(.CodeBufferTooSmall, title.line);
-    return .{ .ok = true, .code = code, .text = message.text, .detail = "R4X_C_App_Desktop" };
+    const code = emitDesktopOkCode(generation, code_out, title.text, ok_label.text, message.text) orelse return fail(.CodeBufferTooSmall, title.line);
+    return .{ .ok = true, .generation = generation, .code = code, .text = message.text, .detail = if (generation == 2) "R4X_C_App2_Desktop" else "R4X_C_App_Desktop" };
 }
 
 fn fail(err: CompileError, line: u32) CompileResult {
     return .{ .ok = false, .err = err, .line = line };
 }
 
-fn hasAppMainShape(source: []const u8) bool {
+fn hasAppMainShape(comptime generation: u8, source: []const u8) bool {
     return indexOf(source, "int32_t") != null and
         indexOf(source, "r4_app_main") != null and
-        indexOf(source, "R4App") != null;
+        indexOf(source, if (generation == 2) "R4App2" else "R4App") != null;
 }
 
 fn parseTextMacro(source: []const u8, literal_out: []u8) ?TextMacro {
@@ -196,6 +225,21 @@ fn parseWriteCall(source: []const u8) ?WriteCall {
     return null;
 }
 
+fn parseStdioCall(source: []const u8) ?WriteCall {
+    const call = indexOf(source, "R4SdkStdioWrite") orelse return null;
+    var cursor = call + "R4SdkStdioWrite".len;
+    for ([_][]const u8{ "(", "&", "io", ",", "1", ",", "(", "const", "uint8_t", "*", ")" }) |token| {
+        cursor = skipSpaces(source, cursor);
+        if (!startsWith(source[cursor..], token)) return null;
+        cursor += token.len;
+    }
+    cursor = skipSpaces(source, cursor);
+    const start = cursor;
+    if (cursor >= source.len or !isIdentStart(source[cursor])) return null;
+    while (cursor < source.len and isIdent(source[cursor])) : (cursor += 1) {}
+    return .{ .name = source[start..cursor], .line_output = false, .line = lineOf(source, call) };
+}
+
 fn parseNamedWriteCall(source: []const u8, function_name: []const u8, line_output: bool) ?WriteCall {
     const call_pos = indexOf(source, function_name) orelse return null;
     var i = call_pos + function_name.len;
@@ -218,17 +262,20 @@ fn parseNamedWriteCall(source: []const u8, function_name: []const u8, line_outpu
     return .{ .name = source[name_start..i], .line_output = line_output, .line = lineOf(source, call_pos) };
 }
 
-fn emitConsoleCode(out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
+fn emitConsoleCode(comptime generation: u8, out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
     var e = Emitter{ .out = out };
 
     e.codeBytes(&.{ 0x55, 0x48, 0x89, 0xE5, 0x53, 0x48, 0x83, 0xEC, 0x08 });
     e.codeBytes(&.{ 0x48, 0x85, 0xFF });
     const jz_null = e.jcc(0x84);
-    e.codeBytes(&.{ 0x81, 0x3F, 0x52, 0x34, 0x58, 0x53 });
+    e.codeBytes(&.{ 0x81, 0x3F });
+    e.emitU32(if (generation == 2) @import("r4os").platform2.abi.start_magic else 0x53583452);
     const jne_magic = e.jcc(0x85);
-    e.codeBytes(&.{ 0x66, 0x83, 0x7F, 0x04, 0x01 });
+    e.codeBytes(&.{ 0x66, 0x83, 0x7F, 0x04 });
+    e.byte(generation);
     const jne_abi = e.jcc(0x85);
-    e.codeBytes(&.{ 0x81, 0x7F, 0x08, 0x80, 0x00, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x81, 0x7F, 0x08 });
+    e.emitU32(if (generation == 2) @sizeOf(@import("r4os").platform2.abi.R4XStartContext2) else 128);
     const jb_size = e.jcc(0x82);
     e.codeBytes(&.{ 0xF7, 0x47, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_import_flag = e.jcc(0x84);
@@ -240,6 +287,10 @@ fn emitConsoleCode(out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
     const loop_label = e.pos();
     e.codeBytes(&.{ 0x41, 0x83, 0x39, 0x01 });
     const jne_next_group = e.jcc(0x85);
+    const jne_next_version: ?usize = if (generation == 2) version: {
+        e.codeBytes(&.{ 0x41, 0x83, 0x79, 0x04, 0x02 });
+        break :version e.jcc(0x85);
+    } else null;
     e.codeBytes(&.{ 0x41, 0xF7, 0x41, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_next_flags = e.jcc(0x84);
     e.codeBytes(&.{ 0x49, 0x8B, 0x59, 0x20, 0x48, 0x85, 0xDB });
@@ -252,11 +303,14 @@ fn emitConsoleCode(out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
     const jmp_no_import = e.jmp();
 
     const found_label = e.pos();
-    e.codeBytes(&.{ 0x81, 0x3B, 0x52, 0x53, 0x59, 0x31 });
+    e.codeBytes(&.{ 0x81, 0x3B });
+    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic else 0x31595352);
     const jne_table_magic = e.jcc(0x85);
-    e.codeBytes(&.{ 0x83, 0x7B, 0x04, 0x02 });
+    e.codeBytes(&.{ 0x83, 0x7B, 0x04 });
+    e.byte(if (generation == 2) 1 else 2);
     const jb_table_version = e.jcc(0x82);
-    e.codeBytes(&.{ 0x81, 0x7B, 0x08, 0xE0, 0x00, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x81, 0x7B, 0x08 });
+    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "putc") + 8 else 224);
     const jb_table_size = e.jcc(0x82);
     e.codeBytes(&.{ 0x48, 0x8B, 0x43, 0x10, 0x48, 0x85, 0xC0 });
     const jz_write = e.jcc(0x84);
@@ -304,6 +358,7 @@ fn emitConsoleCode(out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
     e.patch(jz_import_ptr, fail52);
     e.patch(jz_import_count, fail52);
     e.patch(jne_next_group, next_label);
+    if (jne_next_version) |patch| e.patch(patch, next_label);
     e.patch(jz_next_flags, next_label);
     e.patch(jz_next_table, next_label);
     e.patch(jmp_found, found_label);
@@ -321,7 +376,216 @@ fn emitConsoleCode(out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
     return out[0..e.len];
 }
 
-fn emitDesktopOkCode(out: []u8, title: []const u8, ok_label: []const u8, message: []const u8) ?[]const u8 {
+fn emitStdioConsole2(out: []u8, text: []const u8) ?[]const u8 {
+    const r = @import("r4os");
+    const a = r.abi;
+    const p = r.platform2.abi;
+    const snapshot: u32 = (@sizeOf(a.BytePipeEnd) + 15) & ~@as(u32, 15);
+    const deadline: u32 = snapshot + @sizeOf(a.LaunchIo);
+    const progress: u32 = deadline + @sizeOf(a.WaitSetDeadline);
+    const frame_bytes: u32 = ((progress + @sizeOf(a.BytePipeProgress) + 15) & ~@as(u32, 15)) + 8;
+    const binding = snapshot + @offsetOf(a.LaunchIo, "stdout_binding");
+    const pipe_end = binding + @offsetOf(a.LaunchIoBinding, "end");
+    var e = Emitter{ .out = out };
+    var invalid_context: [8]usize = undefined;
+    var context_count: usize = 0;
+    var invalid_provider: [48]usize = undefined;
+    var provider_count: usize = 0;
+    var success: [8]usize = undefined;
+    var success_count: usize = 0;
+    var api_failure: [8]usize = undefined;
+    var api_count: usize = 0;
+
+    // The outgoing24-byte by-value pipe end occupies the first stack32bytes.
+    // The remaining locals hold the copied stdio snapshot and private records.
+    e.codeBytes(&.{ 0x55, 0x48, 0x89, 0xE5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC });
+    e.emitU32(frame_bytes);
+    e.codeBytes(&.{ 0x49, 0x89, 0xFD, 0x49, 0x89, 0xFF, 0x48, 0x85, 0xFF });
+    notePatchJcc(&e, &invalid_context, &context_count, 0x84);
+    e.codeBytes(&.{ 0x81, 0x3F });
+    e.emitU32(p.start_magic);
+    notePatchJcc(&e, &invalid_context, &context_count, 0x85);
+    e.codeBytes(&.{ 0x66, 0x83, 0x7F, 0x04, 0x02 });
+    notePatchJcc(&e, &invalid_context, &context_count, 0x85);
+    e.codeBytes(&.{ 0x81, 0x7F, 0x08 });
+    e.emitU32(@sizeOf(p.R4XStartContext2));
+    notePatchJcc(&e, &invalid_context, &context_count, 0x82);
+    e.codeBytes(&.{ 0xF7, 0x47, 0x0C, 0x01, 0x00, 0x00, 0x00 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x84);
+    emitFindImportInto(2, &e, 1, .rbx, &invalid_provider, &provider_count);
+    emitFindImportInto(2, &e, 2, .r12, &invalid_provider, &provider_count);
+
+    e.codeBytes(&.{ 0x81, 0x3B });
+    e.emitU32((p.R4XStartR4Sys2{}).magic);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.codeBytes(&.{ 0x83, 0x7B, 0x04, 0x01 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x82);
+    e.codeBytes(&.{ 0x81, 0x7B, 0x08 });
+    e.emitU32(@offsetOf(p.R4XStartR4Sys2, "program_stdio") + 8);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x82);
+    e.codeBytes(&.{ 0x41, 0x81, 0x3C, 0x24 });
+    e.emitU32((p.R4XStartR4Desk2{}).magic);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.codeBytes(&.{ 0x41, 0x83, 0x7C, 0x24, 0x04, 0x01 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x82);
+    e.codeBytes(&.{ 0x41, 0x81, 0x7C, 0x24, 0x08 });
+    e.emitU32(@offsetOf(p.R4XStartR4Desk2, "console_write") + 8);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x82);
+
+    e.codeBytes(&.{ 0x31, 0xC0 });
+    for (0..(@sizeOf(a.LaunchIo) + @sizeOf(a.WaitSetDeadline) + @sizeOf(a.BytePipeProgress)) / 8) |index| e.storeStackRax(snapshot + @as(u32, @intCast(index * 8)));
+    e.codeBytes(&.{0xB8});
+    e.emitU32(1);
+    e.storeStackRax(deadline);
+    e.codeBytes(&.{0xB8});
+    e.emitU32(@sizeOf(a.WaitSetDeadline));
+    e.storeStackRax(deadline + 4);
+    emitRaxFromRbx(&e, @offsetOf(p.R4XStartR4Sys2, "program_stdio"));
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x84);
+    e.codeBytes(&.{ 0x48, 0x8D, 0xBC, 0x24 });
+    e.emitU32(snapshot);
+    e.codeBytes(&.{ 0xFF, 0xD0, 0x85, 0xC0 });
+    notePatchJcc(&e, &api_failure, &api_count, 0x85);
+    e.compareStack32(snapshot, 1);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.compareStack32(snapshot + 4, @sizeOf(a.LaunchIo));
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.compareStack32(binding + @offsetOf(a.LaunchIoBinding, "reserved"), 0);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.compareStack32(binding, a.launch_io_pipe);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x87);
+    e.codeBytes(&.{ 0x4C, 0x8D, 0x2D });
+    const text_reference = e.reserve(4);
+    e.codeBytes(&.{ 0x41, 0xBE });
+    e.emitU32(@intCast(text.len));
+
+    const loop = e.pos();
+    e.codeBytes(&.{ 0x4D, 0x85, 0xF6 });
+    notePatchJcc(&e, &success, &success_count, 0x84);
+    e.codeBytes(&.{ 0x41, 0xF7, 0x47, 0x0C, 0x04, 0x00, 0x00, 0x00 });
+    const no_close_flag = e.jcc(0x84);
+    e.codeBytes(&.{ 0x49, 0x8B, 0x47, 0x60, 0x48, 0x85, 0xC0 });
+    const no_close_callback = e.jcc(0x84);
+    e.codeBytes(&.{ 0x4C, 0x89, 0xFF, 0xFF, 0xD0, 0x85, 0xC0 });
+    notePatchJcc(&e, &success, &success_count, 0x85);
+    const select = e.pos();
+    e.patch(no_close_flag, select);
+    e.patch(no_close_callback, select);
+    e.compareStack32(binding, a.launch_io_pipe);
+    const pipe = e.jcc(0x84);
+
+    // Default console writes retain the public synchronous handoff count.
+    emitRaxFromR12(&e, @offsetOf(p.R4XStartR4Desk2, "console_write"));
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x84);
+    emitMovEdi(&e, 1);
+    e.codeBytes(&.{ 0x4C, 0x89, 0xEE, 0x4C, 0x89, 0xF2, 0xFF, 0xD0, 0x85, 0xC0 });
+    notePatchJcc(&e, &api_failure, &api_count, 0x88);
+    e.codeBytes(&.{ 0x89, 0xC0, 0x4C, 0x39, 0xF0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x87);
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    const console_blocked = e.jcc(0x84);
+    const console_progress = e.jmp();
+
+    e.patch(pipe, e.pos());
+    for (0..@sizeOf(a.BytePipeEnd) / 8) |index| {
+        e.loadStackRax(pipe_end + @as(u32, @intCast(index * 8)));
+        e.storeStackRax(@intCast(index * 8));
+    }
+    e.codeBytes(&.{ 0x31, 0xC0 });
+    for (0..@sizeOf(a.BytePipeProgress) / 8) |index| e.storeStackRax(progress + @as(u32, @intCast(index * 8)));
+    e.codeBytes(&.{0xB8});
+    e.emitU32(1);
+    e.storeStackRax(progress);
+    e.codeBytes(&.{0xB8});
+    e.emitU32(@sizeOf(a.BytePipeProgress));
+    e.storeStackRax(progress + 4);
+    emitRaxFromRbx(&e, @offsetOf(p.R4XStartR4Sys2, "byte_pipe_write"));
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x84);
+    e.codeBytes(&.{ 0x4C, 0x89, 0xEF, 0x4C, 0x89, 0xF6, 0x48, 0x8D, 0x94, 0x24 });
+    e.emitU32(deadline);
+    e.codeBytes(&.{ 0x48, 0x8D, 0x8C, 0x24 });
+    e.emitU32(progress);
+    e.codeBytes(&.{ 0xFF, 0xD0, 0x85, 0xC0 });
+    notePatchJcc(&e, &api_failure, &api_count, 0x85);
+    e.compareStack32(progress, 1);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.compareStack32(progress + 4, @sizeOf(a.BytePipeProgress));
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.compareStack32(progress + @offsetOf(a.BytePipeProgress, "flags"), 0);
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    e.loadStackRax(progress + @offsetOf(a.BytePipeProgress, "bytes"));
+    e.codeBytes(&.{ 0x4C, 0x39, 0xF0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x87);
+    e.compareStack32(progress + @offsetOf(a.BytePipeProgress, "state"), a.byte_pipe_ready);
+    const ready = e.jcc(0x84);
+    e.compareStack32(progress + @offsetOf(a.BytePipeProgress, "state"), a.byte_pipe_would_block);
+    const io_failure = e.jcc(0x85);
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x85);
+    const pipe_blocked = e.jmp();
+
+    e.patch(ready, e.pos());
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    const empty_ready = e.jcc(0x84);
+    e.patch(console_progress, e.pos());
+    e.codeBytes(&.{ 0x49, 0x01, 0xC5, 0x49, 0x29, 0xC6 });
+    const advanced = e.jmp();
+    e.patch(advanced, loop);
+    const blocked = e.pos();
+    e.patch(console_blocked, blocked);
+    e.patch(pipe_blocked, blocked);
+    e.patch(empty_ready, blocked);
+    emitRaxFromRbx(&e, @offsetOf(p.R4XStartR4Sys2, "sleep_ticks"));
+    e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
+    notePatchJcc(&e, &invalid_provider, &provider_count, 0x84);
+    emitMovEdi(&e, 1);
+    e.codeBytes(&.{ 0xFF, 0xD0 });
+    const slept = e.jmp();
+    e.patch(slept, loop);
+
+    const success_label = e.pos();
+    e.codeBytes(&.{ 0x31, 0xC0 });
+    const successful_return = e.jmp();
+    const invalid_context_label = e.pos();
+    emitMovEax(&e, 51);
+    const context_return = e.jmp();
+    const invalid_provider_label = e.pos();
+    emitMovEax(&e, 52);
+    const provider_return = e.jmp();
+    const io_failure_label = e.pos();
+    emitMovEax(&e, 1);
+    const epilogue = e.pos();
+    e.codeBytes(&.{ 0x48, 0x81, 0xC4 });
+    e.emitU32(frame_bytes);
+    e.codeBytes(&.{ 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3 });
+    const text_position = e.pos();
+    e.bytes(text);
+    e.byte(0);
+    patchList(&e, invalid_context[0..context_count], invalid_context_label);
+    patchList(&e, invalid_provider[0..provider_count], invalid_provider_label);
+    patchList(&e, success[0..success_count], success_label);
+    patchList(&e, api_failure[0..api_count], epilogue);
+    e.patch(io_failure, io_failure_label);
+    e.patch(successful_return, epilogue);
+    e.patch(context_return, epilogue);
+    e.patch(provider_return, epilogue);
+    e.patchI32(text_reference, @as(i64, @intCast(text_position)) - @as(i64, @intCast(text_reference + 4)));
+    return if (e.ok) out[0..e.len] else null;
+}
+
+fn emitRaxFromRbx(e: *Emitter, offset: u32) void {
+    e.codeBytes(&.{ 0x48, 0x8B, 0x83 });
+    e.emitU32(offset);
+}
+fn emitMovEax(e: *Emitter, value: u32) void {
+    e.byte(0xB8);
+    e.emitU32(value);
+}
+
+fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_label: []const u8, message: []const u8) ?[]const u8 {
     var e = Emitter{ .out = out };
     var fail51_patches: [8]usize = undefined;
     var fail51_count: usize = 0;
@@ -336,69 +600,79 @@ fn emitDesktopOkCode(out: []u8, title: []const u8, ok_label: []const u8, message
     e.codeBytes(&.{ 0x49, 0x89, 0xFD });
     e.codeBytes(&.{ 0x48, 0x85, 0xFF });
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x84);
-    e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x00, 0x52, 0x34, 0x58, 0x53 });
+    e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x00 });
+    e.emitU32(if (generation == 2) @import("r4os").platform2.abi.start_magic else 0x53583452);
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x85);
-    e.codeBytes(&.{ 0x66, 0x41, 0x83, 0x7D, 0x04, 0x01 });
+    e.codeBytes(&.{ 0x66, 0x41, 0x83, 0x7D, 0x04 });
+    e.byte(generation);
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x85);
-    e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x08, 0x80, 0x00, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x08 });
+    e.emitU32(if (generation == 2) @sizeOf(@import("r4os").platform2.abi.R4XStartContext2) else 128);
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x82);
     e.codeBytes(&.{ 0x41, 0xF7, 0x45, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
-    emitFindImportInto(&e, 1, .rbx, fail52_patches[0..], &fail52_count);
-    e.codeBytes(&.{ 0x81, 0x3B, 0x52, 0x53, 0x59, 0x31 });
+    emitFindImportInto(generation, &e, 1, .rbx, fail52_patches[0..], &fail52_count);
+    e.codeBytes(&.{ 0x81, 0x3B });
+    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic else 0x31595352);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
-    e.codeBytes(&.{ 0x83, 0x7B, 0x04, 0x02 });
+    e.codeBytes(&.{ 0x83, 0x7B, 0x04 });
+    e.byte(if (generation == 2) 1 else 2);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    e.codeBytes(&.{ 0x81, 0x7B, 0x08, 0xE0, 0x00, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x81, 0x7B, 0x08 });
+    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "program_should_close") + 8 else 224);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
 
-    emitFindImportInto(&e, 2, .r12, fail52_patches[0..], &fail52_count);
-    e.codeBytes(&.{ 0x41, 0x81, 0x3C, 0x24, 0x52, 0x44, 0x45, 0x31 });
+    emitFindImportInto(generation, &e, 2, .r12, fail52_patches[0..], &fail52_count);
+    e.codeBytes(&.{ 0x41, 0x81, 0x3C, 0x24 });
+    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Desk2{}).magic else 0x31454452);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
     e.codeBytes(&.{ 0x41, 0x83, 0x7C, 0x24, 0x04, 0x01 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    e.codeBytes(&.{ 0x41, 0x81, 0x7C, 0x24, 0x08, 0x40, 0x01, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x41, 0x81, 0x7C, 0x24, 0x08 });
+    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") + 8 else 384);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    emitRaxFromR12(&e, 104);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id") else 104);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR12(&e, 128);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event") else 128);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR12(&e, 376);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") else 376);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
-    emitFindImportInto(&e, 3, .r14, fail52_patches[0..], &fail52_count);
-    e.codeBytes(&.{ 0x41, 0x81, 0x3E, 0x52, 0x44, 0x57, 0x31 });
+    emitFindImportInto(generation, &e, 3, .r14, fail52_patches[0..], &fail52_count);
+    e.codeBytes(&.{ 0x41, 0x81, 0x3E });
+    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Draw2{}).magic else 0x31574452);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
     e.codeBytes(&.{ 0x41, 0x83, 0x7E, 0x04, 0x01 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    e.codeBytes(&.{ 0x41, 0x81, 0x7E, 0x08, 0xD8, 0x00, 0x00, 0x00 });
+    e.codeBytes(&.{ 0x41, 0x81, 0x7E, 0x08 });
+    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") + 8 else 216);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    emitRaxFromR14(&e, 96);
+    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_clear") else 96);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, 104);
+    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_rect") else 104);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, 112);
+    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_draw_text") else 112);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, 144);
+    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") else 144);
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
-    emitRaxFromR12(&e, 104);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id") else 104);
     e.codeBytes(&.{ 0xFF, 0xD0, 0x85, 0xC0 });
     notePatchJcc(&e, fail63_patches[0..], &fail63_count, 0x8C);
 
-    emitRaxFromR12(&e, 176);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_title") else 176);
     e.codeBytes(&.{ 0x48, 0x8D, 0x3D });
     const title_ref = e.reserve(4);
     e.codeBytes(&.{ 0xFF, 0xD0 });
-    emitRaxFromR12(&e, 192);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_min_size") else 192);
     e.codeBytes(&.{ 0xBF, 0x04, 0x01, 0x00, 0x00, 0xBE, 0x8C, 0x00, 0x00, 0x00, 0xFF, 0xD0 });
 
     emitGuiClear(&e, 0x00C0C0C0);
@@ -410,7 +684,7 @@ fn emitDesktopOkCode(out: []u8, title: []const u8, ok_label: []const u8, message
     emitGuiRect(&e, 86, 80, 68, 21, 0x00C0C0C0);
     const message_ref = emitGuiText(&e, 58, 50, 0x000000, 0x00FFFFFF);
     const ok_ref = emitGuiText(&e, 112, 86, 0x000000, 0x00C0C0C0);
-    emitRaxFromR14(&e, 144);
+    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") else 144);
     e.codeBytes(&.{ 0xFF, 0xD0 });
 
     e.codeBytes(&.{ 0x48, 0xC7, 0x45, 0xA8, 0x00, 0x00, 0x00, 0x00 });
@@ -433,7 +707,7 @@ fn emitDesktopOkCode(out: []u8, title: []const u8, ok_label: []const u8, message
     e.patch(no_table_close, poll_label);
     emitZeroEvent(&e);
     e.codeBytes(&.{ 0x48, 0x8D, 0x7D, 0xB0 });
-    emitRaxFromR12(&e, 128);
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event") else 128);
     e.codeBytes(&.{ 0xFF, 0xD0, 0x83, 0xF8, 0x00 });
     const no_event = e.jcc(0x8E);
     e.codeBytes(&.{ 0x83, 0x7D, 0xB0, 0x01 });
@@ -457,8 +731,9 @@ fn emitDesktopOkCode(out: []u8, title: []const u8, ok_label: []const u8, message
 
     const wait_label = e.pos();
     e.patch(no_event, wait_label);
-    emitRaxFromR12(&e, 376);
-    e.codeBytes(&.{ 0x31, 0xFF, 0x48, 0xC7, 0xC6, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x8D, 0x55, 0xA8, 0xFF, 0xD0, 0x85, 0xC0 });
+    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") else 376);
+    // Wait against the sequence returned by the previous observation.
+    e.codeBytes(&.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x8D, 0x55, 0xA8, 0xFF, 0xD0, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x88);
     const loop_after_wait = e.jmp();
 
@@ -533,7 +808,7 @@ fn patchList(e: *Emitter, patches: []const usize, target: usize) void {
     for (patches) |patch_pos| e.patch(patch_pos, target);
 }
 
-fn emitFindImportInto(e: *Emitter, group: u8, dest: ImportDest, fail_patches: []usize, fail_count: *usize) void {
+fn emitFindImportInto(comptime generation: u8, e: *Emitter, group: u8, dest: ImportDest, fail_patches: []usize, fail_count: *usize) void {
     e.codeBytes(&.{ 0x4D, 0x8B, 0x4D, 0x38, 0x41, 0x8B, 0x4D, 0x40, 0x85, 0xC9 });
     notePatchJcc(e, fail_patches, fail_count, 0x84);
 
@@ -541,6 +816,10 @@ fn emitFindImportInto(e: *Emitter, group: u8, dest: ImportDest, fail_patches: []
     e.codeBytes(&.{ 0x41, 0x83, 0x39 });
     e.byte(group);
     const jne_next_group = e.jcc(0x85);
+    const jne_next_version: ?usize = if (generation == 2) version: {
+        e.codeBytes(&.{ 0x41, 0x83, 0x79, 0x04, 0x02 });
+        break :version e.jcc(0x85);
+    } else null;
     e.codeBytes(&.{ 0x41, 0xF7, 0x41, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_next_flags = e.jcc(0x84);
     switch (dest) {
@@ -553,6 +832,7 @@ fn emitFindImportInto(e: *Emitter, group: u8, dest: ImportDest, fail_patches: []
 
     const next_label = e.pos();
     e.patch(jne_next_group, next_label);
+    if (jne_next_version) |patch| e.patch(patch, next_label);
     e.patch(jz_next_flags, next_label);
     e.patch(jz_next_table, next_label);
     e.codeBytes(&.{ 0x49, 0x83, 0xC1, 0x28, 0xFF, 0xC9 });
@@ -639,6 +919,20 @@ const Emitter = struct {
     out: []u8,
     len: usize = 0,
     ok: bool = true,
+
+    fn storeStackRax(self: *Emitter, offset: u32) void {
+        self.codeBytes(&.{ 0x48, 0x89, 0x84, 0x24 });
+        self.emitU32(offset);
+    }
+    fn loadStackRax(self: *Emitter, offset: u32) void {
+        self.codeBytes(&.{ 0x48, 0x8B, 0x84, 0x24 });
+        self.emitU32(offset);
+    }
+    fn compareStack32(self: *Emitter, offset: u32, value: u32) void {
+        self.codeBytes(&.{ 0x81, 0xBC, 0x24 });
+        self.emitU32(offset);
+        self.emitU32(value);
+    }
 
     fn pos(self: *const Emitter) usize {
         return self.len;
@@ -781,6 +1075,19 @@ test "desktop profile accepts the current GUI facade and emits an activity wait"
     const result = compileDesktopOk(source, code[0..], literals[0..]);
     try @import("std").testing.expect(result.ok);
     try @import("std").testing.expect(result.code.len > 0);
+    try @import("std").testing.expect(indexOf(result.code, &.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6 }) != null);
+    const std = @import("std");
+    const work = try std.mem.replaceOwned(u8, std.testing.allocator, source, "r4_app_main(R4App *app)", "work(R4App *app)");
+    defer std.testing.allocator.free(work);
+    const source2 = try std.mem.concat(std.testing.allocator, u8, &.{
+        "#include <r4os/app2.h>\n",
+        work,
+        "\nint32_t r4_app_main(R4App2 *app2) { R4App app; int32_t rc=r4_app2_facade(app2,&app); return rc<0?rc:work(&app); }\n",
+    });
+    defer std.testing.allocator.free(source2);
+    const next = compileDesktopOk2(source2, &code, &literals);
+    try @import("std").testing.expect(next.ok and next.generation == 2);
+    try @import("std").testing.expect(indexOf(next.code, &.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6 }) != null);
 }
 
 test "console profile accepts only the current App facade" {
@@ -804,4 +1111,6 @@ test "console profile accepts only the current App facade" {
     const legacy = compileConsole(legacy_source, code[0..], literals[0..]);
     try @import("std").testing.expect(!legacy.ok);
     try @import("std").testing.expectEqual(CompileError.MissingMain, legacy.err.?);
+    const wrong_generation = compileConsole2(source, &code, &literals);
+    try @import("std").testing.expectEqual(CompileError.MissingMain, wrong_generation.err.?);
 }

@@ -1,6 +1,18 @@
 ﻿R4CC
 ====
 
-Eigenstaendiges R4OS-R4Code-Komponentenrepository. Das Repository besitzt
-den gemeinsamen Kern Shared/r4cc_core.zig und exportiert ihn als
-$(System.Collections.Hashtable.Export) fuer deklarierte Buildverbraucher.
+R4CC besitzt Shared/r4cc_core.zig und exportiert den Kern als NamedLazyPath
+r4code_cc_core fuer deklarierte, gepinnte Buildverbraucher.
+
+Das normale Profil R4X_C2_Console erzeugt R4XStart2 und Query2. Der native
+C-Teilumfang erkennt R4App2, R4OS_TEXT und die gepruefte R4SdkStdio2-/
+R4SdkStdioWrite-Schleife einschliesslich Teilzaehlern, WouldBlock und Close.
+R4X_C2_Desktop_OK erzeugt den bestehenden GUI-Teilumfang mit weitergereichter
+Aktivitaetssequenz. Die nativen SDK-Templates zeigen die unterstuetzte Syntax.
+
+Das Werkzeug verwendet App2, ArgCursor, begrenzte Diagnoserecords und die
+gebundene Standardausgabe. Quell- und Ausgabedateien verwenden Metadata2 und
+StreamTransfer mit einer Gesamtfrist. Der Datei-Stream wird vollstaendig
+veroeffentlicht oder abgebrochen. Der Dateilog umfasst weiterhin 8192 Bytes.
+Ein Metadaten-Restart oder ein wechselnder Namespace verwirft die private
+Lesekopie. Die neue Aufnahme teilt die urspruengliche Gesamtfrist.
