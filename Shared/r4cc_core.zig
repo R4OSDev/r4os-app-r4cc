@@ -50,7 +50,7 @@ pub fn errorMessage(err: CompileError) []const u8 {
         .BadTextMacro => "invalid R4OS_TEXT macro",
         .TextLiteralTooLong => "R4OS_TEXT literal is too long",
         .MissingMain => "missing int32_t r4_app_main with the selected App generation",
-        .MissingWriteCall => "missing supported r4sys_write_line(&app->system, text) call",
+        .MissingWriteCall => "missing supported text output call",
         .MissingStdioLoop => "generation2 stdio requires the complete checked write loop",
         .MissingGuiInit => "missing R4DESK/R4DRAW init calls",
         .MissingGuiDrawCall => "missing supported R4DESK/R4DRAW GUI calls",
