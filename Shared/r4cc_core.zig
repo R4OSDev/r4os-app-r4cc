@@ -21,7 +21,7 @@ pub const CompileError = enum {
 
 pub const CompileResult = struct {
     ok: bool,
-    generation: u8 = 1,
+    generation: u8 = 2,
     stdio: bool = false,
     code: []const u8 = "",
     text: []const u8 = "",
@@ -61,15 +61,15 @@ pub fn errorMessage(err: CompileError) []const u8 {
     };
 }
 
-pub fn compileConsole(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
-    return compileConsoleGeneration(1, source_raw, code_out, literal_out);
-}
-
+pub const compileConsole = compileConsole2;
 pub fn compileConsole2(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
     return compileConsoleGeneration(2, source_raw, code_out, literal_out);
 }
 
 fn compileConsoleGeneration(comptime generation: u8, source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    comptime {
+        if (generation != 2) @compileError("Only the current native build profile is supported");
+    }
     const source = stripUtf8Bom(source_raw);
     if (indexOf(source, "#include <r4os/r4os.h>") == null) {
         return fail(.MissingInclude, lineOf(source, 0));
@@ -80,7 +80,7 @@ fn compileConsoleGeneration(comptime generation: u8, source_raw: []const u8, cod
         if (indexOf(source, "R4OS_TEXT") == null) return fail(.MissingTextMacro, lineOf(source, 0));
         return fail(.BadTextMacro, lineOf(source, indexOf(source, "R4OS_TEXT") orelse 0));
     };
-    if (generation == 2 and indexOf(source, "R4SdkStdioWrite") != null) {
+    if (indexOf(source, "R4SdkStdioWrite") != null) {
         const call = parseStdioCall(source) orelse return fail(.MissingWriteCall, lineOf(source, 0));
         if (!equals(macro.name, call.name)) return fail(.TextSymbolMismatch, call.line);
         if (indexOf(source, "R4SdkStdio2") == null or indexOf(source, "progress.bytes") == null or
@@ -96,15 +96,15 @@ fn compileConsoleGeneration(comptime generation: u8, source_raw: []const u8, cod
     return .{ .ok = true, .generation = generation, .code = code, .text = macro.text };
 }
 
-pub fn compileDesktopOk(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
-    return compileDesktopGeneration(1, source_raw, code_out, literal_out);
-}
-
+pub const compileDesktopOk = compileDesktopOk2;
 pub fn compileDesktopOk2(source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
     return compileDesktopGeneration(2, source_raw, code_out, literal_out);
 }
 
 fn compileDesktopGeneration(comptime generation: u8, source_raw: []const u8, code_out: []u8, literal_out: []u8) CompileResult {
+    comptime {
+        if (generation != 2) @compileError("Only the current native build profile is supported");
+    }
     const source = stripUtf8Bom(source_raw);
     if (indexOf(source, "#include <r4os/r4os.h>") == null) {
         return fail(.MissingInclude, lineOf(source, 0));
@@ -141,17 +141,17 @@ fn compileDesktopGeneration(comptime generation: u8, source_raw: []const u8, cod
     }
 
     const code = emitDesktopOkCode(generation, code_out, title.text, ok_label.text, message.text) orelse return fail(.CodeBufferTooSmall, title.line);
-    return .{ .ok = true, .generation = generation, .code = code, .text = message.text, .detail = if (generation == 2) "R4X_C_App2_Desktop" else "R4X_C_App_Desktop" };
+    return .{ .ok = true, .generation = generation, .code = code, .text = message.text, .detail = "R4X_C_App2_Desktop" };
 }
 
 fn fail(err: CompileError, line: u32) CompileResult {
     return .{ .ok = false, .err = err, .line = line };
 }
 
-fn hasAppMainShape(comptime generation: u8, source: []const u8) bool {
+fn hasAppMainShape(comptime _: u8, source: []const u8) bool {
     return indexOf(source, "int32_t") != null and
         indexOf(source, "r4_app_main") != null and
-        indexOf(source, if (generation == 2) "R4App2" else "R4App") != null;
+        indexOf(source, "R4App2") != null;
 }
 
 fn parseTextMacro(source: []const u8, literal_out: []u8) ?TextMacro {
@@ -263,19 +263,22 @@ fn parseNamedWriteCall(source: []const u8, function_name: []const u8, line_outpu
 }
 
 fn emitConsoleCode(comptime generation: u8, out: []u8, text: []const u8, line_output: bool) ?[]const u8 {
+    comptime {
+        if (generation != 2) @compileError("Only the current native build profile is supported");
+    }
     var e = Emitter{ .out = out };
 
     e.codeBytes(&.{ 0x55, 0x48, 0x89, 0xE5, 0x53, 0x48, 0x83, 0xEC, 0x08 });
     e.codeBytes(&.{ 0x48, 0x85, 0xFF });
     const jz_null = e.jcc(0x84);
     e.codeBytes(&.{ 0x81, 0x3F });
-    e.emitU32(if (generation == 2) @import("r4os").platform2.abi.start_magic else 0x53583452);
+    e.emitU32(@import("r4os").platform2.abi.start_magic);
     const jne_magic = e.jcc(0x85);
     e.codeBytes(&.{ 0x66, 0x83, 0x7F, 0x04 });
     e.byte(generation);
     const jne_abi = e.jcc(0x85);
     e.codeBytes(&.{ 0x81, 0x7F, 0x08 });
-    e.emitU32(if (generation == 2) @sizeOf(@import("r4os").platform2.abi.R4XStartContext2) else 128);
+    e.emitU32(@sizeOf(@import("r4os").platform2.abi.R4XStartContext2));
     const jb_size = e.jcc(0x82);
     e.codeBytes(&.{ 0xF7, 0x47, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_import_flag = e.jcc(0x84);
@@ -287,10 +290,10 @@ fn emitConsoleCode(comptime generation: u8, out: []u8, text: []const u8, line_ou
     const loop_label = e.pos();
     e.codeBytes(&.{ 0x41, 0x83, 0x39, 0x01 });
     const jne_next_group = e.jcc(0x85);
-    const jne_next_version: ?usize = if (generation == 2) version: {
+    const jne_next_version: ?usize = version: {
         e.codeBytes(&.{ 0x41, 0x83, 0x79, 0x04, 0x02 });
         break :version e.jcc(0x85);
-    } else null;
+    };
     e.codeBytes(&.{ 0x41, 0xF7, 0x41, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_next_flags = e.jcc(0x84);
     e.codeBytes(&.{ 0x49, 0x8B, 0x59, 0x20, 0x48, 0x85, 0xDB });
@@ -304,13 +307,13 @@ fn emitConsoleCode(comptime generation: u8, out: []u8, text: []const u8, line_ou
 
     const found_label = e.pos();
     e.codeBytes(&.{ 0x81, 0x3B });
-    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic else 0x31595352);
+    e.emitU32((@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic);
     const jne_table_magic = e.jcc(0x85);
     e.codeBytes(&.{ 0x83, 0x7B, 0x04 });
-    e.byte(if (generation == 2) 1 else 2);
+    e.byte(1);
     const jb_table_version = e.jcc(0x82);
     e.codeBytes(&.{ 0x81, 0x7B, 0x08 });
-    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "putc") + 8 else 224);
+    e.emitU32(@offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "putc") + 8);
     const jb_table_size = e.jcc(0x82);
     e.codeBytes(&.{ 0x48, 0x8B, 0x43, 0x10, 0x48, 0x85, 0xC0 });
     const jz_write = e.jcc(0x84);
@@ -586,6 +589,9 @@ fn emitMovEax(e: *Emitter, value: u32) void {
 }
 
 fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_label: []const u8, message: []const u8) ?[]const u8 {
+    comptime {
+        if (generation != 2) @compileError("Only the current native build profile is supported");
+    }
     var e = Emitter{ .out = out };
     var fail51_patches: [8]usize = undefined;
     var fail51_count: usize = 0;
@@ -601,78 +607,78 @@ fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_l
     e.codeBytes(&.{ 0x48, 0x85, 0xFF });
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x84);
     e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x00 });
-    e.emitU32(if (generation == 2) @import("r4os").platform2.abi.start_magic else 0x53583452);
+    e.emitU32(@import("r4os").platform2.abi.start_magic);
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x85);
     e.codeBytes(&.{ 0x66, 0x41, 0x83, 0x7D, 0x04 });
     e.byte(generation);
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x85);
     e.codeBytes(&.{ 0x41, 0x81, 0x7D, 0x08 });
-    e.emitU32(if (generation == 2) @sizeOf(@import("r4os").platform2.abi.R4XStartContext2) else 128);
+    e.emitU32(@sizeOf(@import("r4os").platform2.abi.R4XStartContext2));
     notePatchJcc(&e, fail51_patches[0..], &fail51_count, 0x82);
     e.codeBytes(&.{ 0x41, 0xF7, 0x45, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
     emitFindImportInto(generation, &e, 1, .rbx, fail52_patches[0..], &fail52_count);
     e.codeBytes(&.{ 0x81, 0x3B });
-    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic else 0x31595352);
+    e.emitU32((@import("r4os").platform2.abi.R4XStartR4Sys2{}).magic);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
     e.codeBytes(&.{ 0x83, 0x7B, 0x04 });
-    e.byte(if (generation == 2) 1 else 2);
+    e.byte(1);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
     e.codeBytes(&.{ 0x81, 0x7B, 0x08 });
-    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "program_should_close") + 8 else 224);
+    e.emitU32(@offsetOf(@import("r4os").platform2.abi.R4XStartR4Sys2, "program_should_close") + 8);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
 
     emitFindImportInto(generation, &e, 2, .r12, fail52_patches[0..], &fail52_count);
     e.codeBytes(&.{ 0x41, 0x81, 0x3C, 0x24 });
-    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Desk2{}).magic else 0x31454452);
+    e.emitU32((@import("r4os").platform2.abi.R4XStartR4Desk2{}).magic);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
     e.codeBytes(&.{ 0x41, 0x83, 0x7C, 0x24, 0x04, 0x01 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
     e.codeBytes(&.{ 0x41, 0x81, 0x7C, 0x24, 0x08 });
-    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") + 8 else 384);
+    e.emitU32(@offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") + 8);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id") else 104);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event") else 128);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") else 376);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
     emitFindImportInto(generation, &e, 3, .r14, fail52_patches[0..], &fail52_count);
     e.codeBytes(&.{ 0x41, 0x81, 0x3E });
-    e.emitU32(if (generation == 2) (@import("r4os").platform2.abi.R4XStartR4Draw2{}).magic else 0x31574452);
+    e.emitU32((@import("r4os").platform2.abi.R4XStartR4Draw2{}).magic);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x85);
     e.codeBytes(&.{ 0x41, 0x83, 0x7E, 0x04, 0x01 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
     e.codeBytes(&.{ 0x41, 0x81, 0x7E, 0x08 });
-    e.emitU32(if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") + 8 else 216);
+    e.emitU32(@offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") + 8);
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x82);
-    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_clear") else 96);
+    emitRaxFromR14(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_clear"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_rect") else 104);
+    emitRaxFromR14(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_rect"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_draw_text") else 112);
+    emitRaxFromR14(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_draw_text"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
-    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") else 144);
+    emitRaxFromR14(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present"));
     e.codeBytes(&.{ 0x48, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x84);
 
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id") else 104);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "program_window_id"));
     e.codeBytes(&.{ 0xFF, 0xD0, 0x85, 0xC0 });
     notePatchJcc(&e, fail63_patches[0..], &fail63_count, 0x8C);
 
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_title") else 176);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_title"));
     e.codeBytes(&.{ 0x48, 0x8D, 0x3D });
     const title_ref = e.reserve(4);
     e.codeBytes(&.{ 0xFF, 0xD0 });
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_min_size") else 192);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_set_min_size"));
     e.codeBytes(&.{ 0xBF, 0x04, 0x01, 0x00, 0x00, 0xBE, 0x8C, 0x00, 0x00, 0x00, 0xFF, 0xD0 });
 
     emitGuiClear(&e, 0x00C0C0C0);
@@ -684,7 +690,7 @@ fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_l
     emitGuiRect(&e, 86, 80, 68, 21, 0x00C0C0C0);
     const message_ref = emitGuiText(&e, 58, 50, 0x000000, 0x00FFFFFF);
     const ok_ref = emitGuiText(&e, 112, 86, 0x000000, 0x00C0C0C0);
-    emitRaxFromR14(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present") else 144);
+    emitRaxFromR14(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Draw2, "gui_present"));
     e.codeBytes(&.{ 0xFF, 0xD0 });
 
     e.codeBytes(&.{ 0x48, 0xC7, 0x45, 0xA8, 0x00, 0x00, 0x00, 0x00 });
@@ -707,7 +713,7 @@ fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_l
     e.patch(no_table_close, poll_label);
     emitZeroEvent(&e);
     e.codeBytes(&.{ 0x48, 0x8D, 0x7D, 0xB0 });
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event") else 128);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "gui_poll_event"));
     e.codeBytes(&.{ 0xFF, 0xD0, 0x83, 0xF8, 0x00 });
     const no_event = e.jcc(0x8E);
     e.codeBytes(&.{ 0x83, 0x7D, 0xB0, 0x01 });
@@ -731,7 +737,7 @@ fn emitDesktopOkCode(comptime generation: u8, out: []u8, title: []const u8, ok_l
 
     const wait_label = e.pos();
     e.patch(no_event, wait_label);
-    emitRaxFromR12(&e, if (generation == 2) @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait") else 376);
+    emitRaxFromR12(&e, @offsetOf(@import("r4os").platform2.abi.R4XStartR4Desk2, "desktop_activity_wait"));
     // Wait against the sequence returned by the previous observation.
     e.codeBytes(&.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6, 0xFF, 0xFF, 0xFF, 0xFF, 0x48, 0x8D, 0x55, 0xA8, 0xFF, 0xD0, 0x85, 0xC0 });
     notePatchJcc(&e, fail52_patches[0..], &fail52_count, 0x88);
@@ -809,6 +815,9 @@ fn patchList(e: *Emitter, patches: []const usize, target: usize) void {
 }
 
 fn emitFindImportInto(comptime generation: u8, e: *Emitter, group: u8, dest: ImportDest, fail_patches: []usize, fail_count: *usize) void {
+    comptime {
+        if (generation != 2) @compileError("Only the current native build profile is supported");
+    }
     e.codeBytes(&.{ 0x4D, 0x8B, 0x4D, 0x38, 0x41, 0x8B, 0x4D, 0x40, 0x85, 0xC9 });
     notePatchJcc(e, fail_patches, fail_count, 0x84);
 
@@ -816,10 +825,10 @@ fn emitFindImportInto(comptime generation: u8, e: *Emitter, group: u8, dest: Imp
     e.codeBytes(&.{ 0x41, 0x83, 0x39 });
     e.byte(group);
     const jne_next_group = e.jcc(0x85);
-    const jne_next_version: ?usize = if (generation == 2) version: {
+    const jne_next_version: ?usize = version: {
         e.codeBytes(&.{ 0x41, 0x83, 0x79, 0x04, 0x02 });
         break :version e.jcc(0x85);
-    } else null;
+    };
     e.codeBytes(&.{ 0x41, 0xF7, 0x41, 0x0C, 0x01, 0x00, 0x00, 0x00 });
     const jz_next_flags = e.jcc(0x84);
     switch (dest) {
@@ -1059,7 +1068,7 @@ test "desktop profile accepts the current GUI facade and emits an activity wait"
         \\R4OS_TEXT(window_title, "Test");
         \\R4OS_TEXT(ok_label, "OK");
         \\R4OS_TEXT(message, "Hello");
-        \\int32_t r4_app_main(R4App *app) {
+        \\int32_t r4_app_main(R4App2 *app) {
         \\ R4Timer timers[1]; R4Window window; R4PaintContext paint;
         \\ if (!r4_window_open(app, timers, 1, &window)) return -1;
         \\ r4_window_set_title(&window, window_title);
@@ -1076,16 +1085,7 @@ test "desktop profile accepts the current GUI facade and emits an activity wait"
     try @import("std").testing.expect(result.ok);
     try @import("std").testing.expect(result.code.len > 0);
     try @import("std").testing.expect(indexOf(result.code, &.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6 }) != null);
-    const std = @import("std");
-    const work = try std.mem.replaceOwned(u8, std.testing.allocator, source, "r4_app_main(R4App *app)", "work(R4App *app)");
-    defer std.testing.allocator.free(work);
-    const source2 = try std.mem.concat(std.testing.allocator, u8, &.{
-        "#include <r4os/app2.h>\n",
-        work,
-        "\nint32_t r4_app_main(R4App2 *app2) { R4App app; int32_t rc=r4_app2_facade(app2,&app); return rc<0?rc:work(&app); }\n",
-    });
-    defer std.testing.allocator.free(source2);
-    const next = compileDesktopOk2(source2, &code, &literals);
+    const next = compileDesktopOk2(source, &code, &literals);
     try @import("std").testing.expect(next.ok and next.generation == 2);
     try @import("std").testing.expect(indexOf(next.code, &.{ 0x48, 0x8B, 0x7D, 0xA8, 0x48, 0xC7, 0xC6 }) != null);
 }
@@ -1094,7 +1094,7 @@ test "console profile accepts only the current App facade" {
     const source =
         \\#include <r4os/r4os.h>
         \\R4OS_TEXT(message, "Hello");
-        \\int32_t r4_app_main(R4App *app) {
+        \\int32_t r4_app_main(R4App2 *app) {
         \\ return r4sys_write_line(&app->system, message); }
     ;
     const legacy_source =
@@ -1111,6 +1111,8 @@ test "console profile accepts only the current App facade" {
     const legacy = compileConsole(legacy_source, code[0..], literals[0..]);
     try @import("std").testing.expect(!legacy.ok);
     try @import("std").testing.expectEqual(CompileError.MissingMain, legacy.err.?);
-    const wrong_generation = compileConsole2(source, &code, &literals);
+    const old_app = try @import("std").mem.replaceOwned(u8, @import("std").testing.allocator, source, "R4App2", "R4App");
+    defer @import("std").testing.allocator.free(old_app);
+    const wrong_generation = compileConsole2(old_app, &code, &literals);
     try @import("std").testing.expectEqual(CompileError.MissingMain, wrong_generation.err.?);
 }

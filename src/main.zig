@@ -5,7 +5,7 @@ const r4cc_core = @import("r4code_cc_core");
 const log_capacity: usize = 8192;
 const path_capacity: usize = 192;
 
-const version_text = "R4CC 0.1.4";
+const version_text = "R4CC 0.1.5";
 const toolchain_root = "C:\\R4OS\\SDK\\Toolchains\\C";
 const log_dir = "C:\\R4OS\\SDK\\Toolchains\\C";
 const log_path = "C:\\R4OS\\SDK\\Toolchains\\C\\R4CC.LOG";
@@ -140,15 +140,12 @@ const App = struct {
             return false;
         };
         const generation2 = equalsIgnoreCase(profile, "R4X_C2_Console") or equalsIgnoreCase(profile, "R4X_C2_Desktop_OK");
-        const is_desktop_ok = equalsIgnoreCase(profile, "R4X_C_App_Desktop") or equalsIgnoreCase(profile, "R4X_C2_Desktop_OK");
-        if (!generation2 and !is_desktop_ok and !equalsIgnoreCase(profile, "R4X_C_App_Console")) {
+        const is_desktop_ok = equalsIgnoreCase(profile, "R4X_C2_Desktop_OK");
+        if (!generation2) {
             self.logLine("R4CC error: unsupported profile");
             return false;
         }
-        const compiled = if (generation2)
-            (if (is_desktop_ok) r4cc_core.compileDesktopOk2(source, &self.code_buffer, &self.literal_buffer) else r4cc_core.compileConsole2(source, &self.code_buffer, &self.literal_buffer))
-        else
-            (if (is_desktop_ok) r4cc_core.compileDesktopOk(source, &self.code_buffer, &self.literal_buffer) else r4cc_core.compileConsole(source, &self.code_buffer, &self.literal_buffer));
+        const compiled = if (is_desktop_ok) r4cc_core.compileDesktopOk2(source, &self.code_buffer, &self.literal_buffer) else r4cc_core.compileConsole2(source, &self.code_buffer, &self.literal_buffer);
         if (!compiled.ok) {
             self.logWrite("R4CC error");
             if (compiled.line != 0) {
